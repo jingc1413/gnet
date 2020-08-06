@@ -36,16 +36,16 @@ const features = [
     icon: 'unlock',
     description: (
       <>
-        Gnet is iock-free during the entire life cycle, which gets gnet out of synchronization.
+        Gnet is lock-free during the entire runtime, which speeds gnet up regardless of the synchronization issue.
       </>
     ),
   },
   {
-    title: 'Concise APIs',
+    title: 'Concise & Easy-to-use APIs',
     icon: 'codepen',
     description: (
       <>
-        Gnet provides concise APIs to users, it only exposes the essential APIs and takes over most of the tough work for users,
+        Gnet provides concise and easy-to-use APIs for users, it only exposes the essential APIs and takes over most of the tough work for users,
         minimizes the complexity of business code so that developers are able to concentrate on business logic instead of the underlying implementation.
       </>
     ),
@@ -192,7 +192,7 @@ function InstallationSection() {
 }
 
 const hardware = `
-# Hardware
+# Hardware Environment
 CPU: 28 HT Cores Intel(R) Xeon(R) Gold 5120 CPU @ 2.20GHz
 Mem: 32GB RAM
 OS : Ubuntu 18.04.3 4.15.0-88-generic #88-Ubuntu
@@ -210,7 +210,7 @@ function Performance() {
         <br />
         <img src="/img/techempower-all.jpg" alt="All languages" />
         <br />
-        <p className="hero--subtitle">This is the <strong><em>top 50</em></strong> on the framework ranking of all programming languages consists of a total of <strong><em>422 frameworks</em></strong> from all over the world where <code>gnet</code> is the runner-up.</p>
+        <p className="hero--subtitle">This is the <strong><em>top 50</em></strong> on the framework ranking of all programming languages consists of a total of <strong><em>422 frameworks</em></strong> from all over the world where <code>gnet</code> is the <strong><em>runner-up</em></strong>.</p>
         <img src="/img/techempower-go.png" alt="Go" />
         <br />
         <p className="hero--subtitle">This is the full framework ranking of Go and <code>gnet</code> tops all the other frameworks, which makes <code>gnet</code> the <strong><em>fastest</em></strong> networking framework in Go.</p>
