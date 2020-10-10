@@ -36,7 +36,7 @@ import (
 
 // commandBufferSize represents the buffer size of event-loop command channel on Windows.
 const (
-	commandBufferSize = 512
+	commandBufferSize = 128
 )
 
 var errCloseAllConns = errors.New("close all connections in event-loop")
@@ -78,7 +78,7 @@ func (svr *server) signalShutdown(err error) {
 func (svr *server) startListener() {
 	svr.listenerWG.Add(1)
 	go func() {
-		svr.listenerRun()
+		svr.listenerRun(svr.opts.LockOSThread)
 		svr.listenerWG.Done()
 	}()
 }
@@ -86,7 +86,7 @@ func (svr *server) startListener() {
 func (svr *server) startEventLoops(numEventLoop int) {
 	for i := 0; i < numEventLoop; i++ {
 		el := &eventloop{
-			ch:                make(chan interface{}, commandBufferSize),
+			ch:                make(chan interface{}, channelBuffer(commandBufferSize)),
 			svr:               svr,
 			connections:       make(map[*stdConn]struct{}),
 			eventHandler:      svr.eventHandler,
@@ -97,7 +97,7 @@ func (svr *server) startEventLoops(numEventLoop int) {
 
 	svr.loopWG.Add(svr.subEventLoopSet.len())
 	svr.subEventLoopSet.iterate(func(i int, el *eventloop) bool {
-		go el.loopRun()
+		go el.loopRun(svr.opts.LockOSThread)
 		return true
 	})
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Andy Pan
+// Copyright (c) 2020 Andy Pan
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -18,33 +18,30 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// +build freebsd dragonfly darwin
+package internal
 
-package gnet
+import (
+	"reflect"
+	"unsafe"
+)
 
-import "github.com/panjf2000/gnet/internal/netpoll"
+// BytesToString converts byte slice to a string without memory allocation.
+//
+// Note it may break if the implementation of string or slice header changes in the future go versions.
+func BytesToString(b []byte) string {
+	/* #nosec G103 */
+	return *(*string)(unsafe.Pointer(&b))
+}
 
-func (el *eventloop) handleEvent(fd int, filter int16) error {
-	if c, ok := el.connections[fd]; ok {
-		if filter == netpoll.EVFilterSock {
-			return el.loopCloseConn(c, nil)
-		}
+// StringToBytes converts string to a byte slice without memory allocation.
+//
+// Note it may break if the implementation of string or slice header changes in the future go versions.
+func StringToBytes(s string) (b []byte) {
+	/* #nosec G103 */
+	sh := *(*reflect.StringHeader)(unsafe.Pointer(&s))
+	/* #nosec G103 */
+	bh := (*reflect.SliceHeader)(unsafe.Pointer(&b))
 
-		switch c.outboundBuffer.IsEmpty() {
-		// Don't change the ordering of processing EVFILT_WRITE | EVFILT_READ | EV_ERROR/EV_EOF unless you're 100%
-		// sure what you're doing!
-		// Re-ordering can easily introduce bugs and bad side-effects, as I found out painfully in the past.
-		case false:
-			if filter == netpoll.EVFilterWrite {
-				return el.loopWrite(c)
-			}
-			return nil
-		case true:
-			if filter == netpoll.EVFilterRead {
-				return el.loopRead(c)
-			}
-			return nil
-		}
-	}
-	return el.loopAccept(fd)
+	bh.Data, bh.Len, bh.Cap = sh.Data, sh.Len, sh.Len
+	return b
 }

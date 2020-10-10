@@ -474,23 +474,24 @@ func (s *testServer) OnClosed(c Conn, err error) (action Action) {
 
 func (s *testServer) React(frame []byte, c Conn) (out []byte, action Action) {
 	if s.async {
+		buf := bytebuffer.Get()
+		_, _ = buf.Write(frame)
+		s.bytesList = append(s.bytesList, buf)
+
 		if s.network == "tcp" || s.network == "unix" {
-			_ = c.BufferLength()
-			buf := bytebuffer.Get()
-			_, _ = buf.Write(frame)
-			s.bytesList = append(s.bytesList, buf)
 			// just for test
+			_ = c.BufferLength()
 			c.ShiftN(1)
+
 			_ = s.workerPool.Submit(
 				func() {
 					_ = c.AsyncWrite(buf.Bytes())
 				})
 			return
-		}
-		if s.network == "udp" {
+		} else if s.network == "udp" {
 			_ = s.workerPool.Submit(
 				func() {
-					_ = c.SendTo(frame)
+					_ = c.SendTo(buf.Bytes())
 				})
 			return
 		}
@@ -529,7 +530,7 @@ func testServe(network, addr string, reuseport, multicore, async bool, nclients 
 		nclients:   nclients,
 		workerPool: goroutine.Default(),
 	}
-	must(Serve(ts, network+"://"+addr, WithMulticore(multicore), WithReusePort(reuseport), WithTicker(true),
+	must(Serve(ts, network+"://"+addr, WithLockOSThread(async), WithMulticore(multicore), WithReusePort(reuseport), WithTicker(true),
 		WithTCPKeepAlive(time.Minute*1), WithLoadBalancing(lb)))
 }
 
@@ -1020,4 +1021,13 @@ func (t *testCloseConnectionServer) Tick() (delay time.Duration, action Action) 
 func testCloseConnection(network, addr string) {
 	events := &testCloseConnectionServer{network: network, addr: addr}
 	must(Serve(events, network+"://"+addr, WithTicker(true)))
+}
+
+func TestServerOptionsCheck(t *testing.T) {
+	if err := Serve(&EventServer{}, "tcp://:3500", WithNumEventLoop(10001), WithLockOSThread(true)); err != errors.ErrTooManyEventLoopThreads {
+		t.Fail()
+		t.Log("error returned with LockOSThread option")
+	} else {
+		t.Log("got expected result")
+	}
 }

@@ -25,6 +25,7 @@ package gnet
 
 import (
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/panjf2000/gnet/errors"
@@ -36,8 +37,8 @@ type eventloop struct {
 	ln                *listener               // listener
 	idx               int                     // loop index in the server loops list
 	svr               *server                 // server in loop
-	packet            []byte                  // read packet buffer
 	poller            *netpoll.Poller         // epoll or kqueue
+	packet            []byte                  // read packet buffer
 	connCount         int32                   // number of active connections in event-loop
 	connections       map[int]*conn           // loop connections fd -> conn
 	eventHandler      EventHandler            // user eventHandler
@@ -51,7 +52,12 @@ func (el *eventloop) closeAllConns() {
 	}
 }
 
-func (el *eventloop) loopRun() {
+func (el *eventloop) loopRun(lockOSThread bool) {
+	if lockOSThread {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+	}
+
 	defer func() {
 		el.closeAllConns()
 		el.ln.close()
@@ -90,10 +96,11 @@ func (el *eventloop) loopAccept(fd int) error {
 		if err = os.NewSyscallError("fcntl nonblock", unix.SetNonblock(nfd, true)); err != nil {
 			return err
 		}
-		c := newTCPConn(nfd, el, sa)
+
+		netAddr := netpoll.SockaddrToTCPOrUnixAddr(sa)
+		c := newTCPConn(nfd, el, sa, netAddr)
 		if err = el.poller.AddRead(c.fd); err == nil {
 			el.connections[c.fd] = c
-			el.calibrateCallback(el, 1)
 			return el.loopOpen(c)
 		}
 		return err
@@ -104,13 +111,7 @@ func (el *eventloop) loopAccept(fd int) error {
 
 func (el *eventloop) loopOpen(c *conn) error {
 	c.opened = true
-	c.localAddr = el.ln.lnaddr
-	c.remoteAddr = netpoll.SockaddrToTCPOrUnixAddr(c.sa)
-	if el.svr.opts.TCPKeepAlive > 0 {
-		if proto := el.ln.network; proto == "tcp" || proto == "unix" {
-			_ = netpoll.SetKeepAlive(c.fd, int(el.svr.opts.TCPKeepAlive/time.Second))
-		}
-	}
+	el.calibrateCallback(el, 1)
 
 	out, action := el.eventHandler.OnOpened(c)
 	if out != nil {
@@ -149,6 +150,9 @@ func (el *eventloop) loopRead(c *conn) error {
 		case Shutdown:
 			return errors.ErrServerShutdown
 		}
+
+		// Check the status of connection every loop since it might be closed during writing data back to client due to
+		// some kind of system error.
 		if !c.opened {
 			return nil
 		}
@@ -171,7 +175,7 @@ func (el *eventloop) loopWrite(c *conn) error {
 	}
 	c.outboundBuffer.Shift(n)
 
-	if len(head) == n && tail != nil {
+	if n == len(head) && tail != nil {
 		n, err = unix.Write(c.fd, tail)
 		if err != nil {
 			if err == unix.EAGAIN {
@@ -195,8 +199,16 @@ func (el *eventloop) loopCloseConn(c *conn, err error) error {
 		return nil
 	}
 
-	if !c.outboundBuffer.IsEmpty() && err == nil {
-		_ = el.loopWrite(c)
+	// Send residual data in buffer back to client before actually closing the connection.
+	if !c.outboundBuffer.IsEmpty() {
+		el.eventHandler.PreWrite()
+
+		head, tail := c.outboundBuffer.LazyReadAll()
+		if n, err := unix.Write(c.fd, head); err == nil {
+			if n == len(head) && tail != nil {
+				_, _ = unix.Write(c.fd, tail)
+			}
+		}
 	}
 
 	if err0, err1 := el.poller.Delete(c.fd), unix.Close(c.fd); err0 == nil && err1 == nil {

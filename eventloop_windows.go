@@ -22,9 +22,10 @@
 package gnet
 
 import (
-	"github.com/panjf2000/gnet/pool/bytebuffer"
-	"net"
+	"runtime"
 	"time"
+
+	"github.com/panjf2000/gnet/pool/bytebuffer"
 
 	"github.com/panjf2000/gnet/errors"
 )
@@ -39,7 +40,12 @@ type eventloop struct {
 	calibrateCallback func(*eventloop, int32) // callback func for re-adjusting connCount
 }
 
-func (el *eventloop) loopRun() {
+func (el *eventloop) loopRun(lockOSThread bool) {
+	if lockOSThread {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+	}
+
 	var err error
 	defer func() {
 		if el.idx == 0 && el.svr.opts.Ticker {
@@ -82,15 +88,7 @@ func (el *eventloop) loopRun() {
 
 func (el *eventloop) loopAccept(c *stdConn) error {
 	el.connections[c] = struct{}{}
-	c.localAddr = el.svr.ln.lnaddr
-	c.remoteAddr = c.conn.RemoteAddr()
 	el.calibrateCallback(el, 1)
-	if el.svr.opts.TCPKeepAlive > 0 {
-		if c, ok := c.conn.(*net.TCPConn); ok {
-			_ = c.SetKeepAlive(true)
-			_ = c.SetKeepAlivePeriod(el.svr.opts.TCPKeepAlive)
-		}
-	}
 
 	out, action := el.eventHandler.OnOpened(c)
 	if out != nil {

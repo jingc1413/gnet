@@ -23,10 +23,12 @@ package gnet
 
 import (
 	"net"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/panjf2000/gnet/errors"
 	"github.com/panjf2000/gnet/internal/logging"
 )
 
@@ -52,7 +54,7 @@ type Server struct {
 	// Multicore indicates whether the server will be effectively created with multi-cores, if so,
 	// then you must take care of synchronizing the shared data between all event callbacks, otherwise,
 	// it will run the server with single thread. The number of threads in the server will be automatically
-	// assigned to the value of runtime.NumCPU().
+	// assigned to the value of logical CPUs usable by the current process.
 	Multicore bool
 
 	// The Addr parameter is the listening address that align
@@ -237,6 +239,14 @@ func Serve(eventHandler EventHandler, protoAddr string, opts ...Option) (err err
 	}
 	defer logging.Cleanup()
 
+	// The maximum number of operating system threads that the Go program can use is initially set to 10000,
+	// which should be the maximum amount of I/O event-loops locked to OS threads users can start up.
+	if options.LockOSThread && options.NumEventLoop > 10000 {
+		logging.DefaultLogger.Errorf("too many event-loops under LockOSThread mode, should be less than 10,000 "+
+			"while you are trying to set up %d\n", options.NumEventLoop)
+		return errors.ErrTooManyEventLoopThreads
+	}
+
 	network, addr := parseProtoAddr(protoAddr)
 
 	var ln *listener
@@ -263,4 +273,18 @@ func sniffErrorAndLog(err error) {
 	if err != nil {
 		logging.DefaultLogger.Errorf(err.Error())
 	}
+}
+
+// channelBuffer determines whether the channel should be a buffered channel to get the best performance.
+func channelBuffer(preset int) int {
+	// Use blocking channel if GOMAXPROCS=1.
+	// This switches context from sender to receiver immediately,
+	// which results in higher performance (under go1.5 at least).
+	if runtime.GOMAXPROCS(0) == 1 {
+		return 0
+	}
+
+	// Use non-blocking workerChan if GOMAXPROCS>1,
+	// since otherwise the sender might be dragged down if the receiver is CPU-bound.
+	return preset
 }

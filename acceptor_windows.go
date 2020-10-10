@@ -22,20 +22,16 @@
 package gnet
 
 import (
-	"hash/crc32"
+	"runtime"
 	"time"
 )
 
-// hashCode hashes a string to a unique hashcode.
-func hashCode(s string) int {
-	v := int(crc32.ChecksumIEEE([]byte(s)))
-	if v >= 0 {
-		return v
+func (svr *server) listenerRun(lockOSThread bool) {
+	if lockOSThread {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
 	}
-	return -v
-}
 
-func (svr *server) listenerRun() {
 	var err error
 	defer func() { svr.signalShutdown(err) }()
 	var packet [0x10000]byte
@@ -48,7 +44,7 @@ func (svr *server) listenerRun() {
 				return
 			}
 
-			el := svr.subEventLoopSet.next(hashCode(addr.String()))
+			el := svr.subEventLoopSet.next(addr)
 			c := newUDPConn(el, svr.ln.lnaddr, addr)
 			el.ch <- packUDPConn(c, packet[:n])
 		} else {
@@ -58,7 +54,7 @@ func (svr *server) listenerRun() {
 				err = e
 				return
 			}
-			el := svr.subEventLoopSet.next(hashCode(conn.RemoteAddr().String()))
+			el := svr.subEventLoopSet.next(conn.RemoteAddr())
 			c := newTCPConn(conn, el)
 			el.ch <- c
 			go func() {

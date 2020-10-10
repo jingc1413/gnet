@@ -23,12 +23,20 @@
 package gnet
 
 import (
+	"runtime"
+
 	"github.com/panjf2000/gnet/errors"
 	"github.com/panjf2000/gnet/internal/netpoll"
 )
 
-func (svr *server) activateMainReactor() {
+func (svr *server) activateMainReactor(lockOSThread bool) {
+	if lockOSThread {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+	}
+
 	defer svr.signalShutdown()
+
 	switch err := svr.mainLoop.poller.Polling(func(fd int, filter int16) error { return svr.acceptNewConnection(fd) }); err {
 	case errors.ErrServerShutdown:
 		svr.logger.Infof("Main reactor is exiting normally on the signal error: %v", err)
@@ -38,7 +46,12 @@ func (svr *server) activateMainReactor() {
 	}
 }
 
-func (svr *server) activateSubReactor(el *eventloop) {
+func (svr *server) activateSubReactor(el *eventloop, lockOSThread bool) {
+	if lockOSThread {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+	}
+
 	defer func() {
 		el.closeAllConns()
 		if el.idx == 0 && svr.opts.Ticker {
@@ -50,11 +63,13 @@ func (svr *server) activateSubReactor(el *eventloop) {
 	if el.idx == 0 && svr.opts.Ticker {
 		go el.loopTicker()
 	}
+
 	switch err := el.poller.Polling(func(fd int, filter int16) error {
 		if c, ack := el.connections[fd]; ack {
 			if filter == netpoll.EVFilterSock {
 				return el.loopCloseConn(c, nil)
 			}
+
 			switch c.outboundBuffer.IsEmpty() {
 			// Don't change the ordering of processing EVFILT_WRITE | EVFILT_READ | EV_ERROR/EV_EOF unless you're 100%
 			// sure what you're doing!

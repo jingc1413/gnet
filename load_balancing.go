@@ -22,8 +22,12 @@ package gnet
 
 import (
 	"container/heap"
+	"hash/crc32"
+	"net"
 	"sync"
 	"sync/atomic"
+
+	"github.com/panjf2000/gnet/internal"
 )
 
 // LoadBalancing represents the the type of load-balancing algorithm.
@@ -37,7 +41,7 @@ const (
 	// serving the least number of active connections at the current time.
 	LeastConnections
 
-	// SourceAddrHash assignes the next accepted connection to the event-loop by hashing socket fd.
+	// SourceAddrHash assignes the next accepted connection to the event-loop by hashing the remote address.
 	SourceAddrHash
 )
 
@@ -45,7 +49,7 @@ type (
 	// loadBalancer is a interface which manipulates the event-loop set.
 	loadBalancer interface {
 		register(*eventloop)
-		next(int) *eventloop
+		next(net.Addr) *eventloop
 		iterate(func(int, *eventloop) bool)
 		len() int
 		calibrate(*eventloop, int32)
@@ -83,7 +87,7 @@ func (set *roundRobinEventLoopSet) register(el *eventloop) {
 }
 
 // next returns the eligible event-loop based on Round-Robin algorithm.
-func (set *roundRobinEventLoopSet) next(_ int) (el *eventloop) {
+func (set *roundRobinEventLoopSet) next(_ net.Addr) (el *eventloop) {
 	el = set.eventLoops[set.nextLoopIndex]
 	if set.nextLoopIndex++; set.nextLoopIndex >= set.size {
 		set.nextLoopIndex = 0
@@ -154,7 +158,7 @@ func (set *leastConnectionsEventLoopSet) register(el *eventloop) {
 }
 
 // next returns the eligible event-loop by taking the root node from minimum heap based on Least-Connections algorithm.
-func (set *leastConnectionsEventLoopSet) next(_ int) (el *eventloop) {
+func (set *leastConnectionsEventLoopSet) next(_ net.Addr) (el *eventloop) {
 	// set.RLock()
 	// el = set.minHeap[0]
 	// set.RUnlock()
@@ -208,8 +212,18 @@ func (set *sourceAddrHashEventLoopSet) register(el *eventloop) {
 	set.size++
 }
 
-// next returns the eligible event-loop by taking the remainder of a given fd as the index of event-loop list.
-func (set *sourceAddrHashEventLoopSet) next(hashCode int) *eventloop {
+// hash hashes a string to a unique hash code.
+func (set *sourceAddrHashEventLoopSet) hash(s string) int {
+	v := int(crc32.ChecksumIEEE(internal.StringToBytes(s)))
+	if v >= 0 {
+		return v
+	}
+	return -v
+}
+
+// next returns the eligible event-loop by taking the remainder of a hash code as the index of event-loop list.
+func (set *sourceAddrHashEventLoopSet) next(netAddr net.Addr) *eventloop {
+	hashCode := set.hash(netAddr.String())
 	return set.eventLoops[hashCode%set.size]
 }
 
