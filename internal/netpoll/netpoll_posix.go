@@ -1,5 +1,4 @@
-// Copyright (c) 2019 Andy Pan
-// Copyright (c) 2018 Joshua J Baker
+// Copyright (c) 2021 Andy Pan
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -19,56 +18,25 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-package gnet
+// +build linux freebsd dragonfly darwin
+
+package netpoll
 
 import (
-	"runtime"
-	"time"
+	"os"
+
+	"golang.org/x/sys/unix"
 )
 
-func (svr *server) listenerRun(lockOSThread bool) {
-	if lockOSThread {
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
+// SetNoDelay controls whether the operating system should delay
+// packet transmission in hopes of sending fewer packets (Nagle's algorithm).
+//
+// The default is true (no delay), meaning that data is
+// sent as soon as possible after a Write.
+func SetNoDelay(fd int, noDelay bool) error {
+	var arg int
+	if noDelay {
+		arg = 1
 	}
-
-	var err error
-	defer func() { svr.signalShutdownWithErr(err) }()
-	var packet [0x10000]byte
-	for {
-		if svr.ln.pconn != nil {
-			// Read data from UDP socket.
-			n, addr, e := svr.ln.pconn.ReadFrom(packet[:])
-			if e != nil {
-				err = e
-				return
-			}
-
-			el := svr.lb.next(addr)
-			c := newUDPConn(el, svr.ln.lnaddr, addr)
-			el.ch <- packUDPConn(c, packet[:n])
-		} else {
-			// Accept TCP socket.
-			conn, e := svr.ln.ln.Accept()
-			if e != nil {
-				err = e
-				return
-			}
-			el := svr.lb.next(conn.RemoteAddr())
-			c := newTCPConn(conn, el)
-			el.ch <- c
-			go func() {
-				var packet [0x10000]byte
-				for {
-					n, err := c.conn.Read(packet[:])
-					if err != nil {
-						_ = c.conn.SetReadDeadline(time.Time{})
-						el.ch <- &stderr{c, err}
-						return
-					}
-					el.ch <- packTCPConn(c, packet[:n])
-				}
-			}()
-		}
-	}
+	return os.NewSyscallError("setsockopt", unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_NODELAY, arg))
 }

@@ -22,6 +22,7 @@
 package gnet
 
 import (
+	"context"
 	"net"
 	"runtime"
 	"strings"
@@ -73,10 +74,21 @@ type Server struct {
 
 // CountConnections counts the number of currently active connections and returns it.
 func (s Server) CountConnections() (count int) {
-	s.svr.subEventLoopSet.iterate(func(i int, el *eventloop) bool {
+	s.svr.lb.iterate(func(i int, el *eventloop) bool {
 		count += int(atomic.LoadInt32(&el.connCount))
 		return true
 	})
+	return
+}
+
+// DupFd returns a copy of the underlying file descriptor of listener.
+// It is the caller's responsibility to close dupFD when finished.
+// Closing listener does not affect dupFD, and closing dupFD does not affect listener.
+func (s Server) DupFd() (dupFD int, err error) {
+	dupFD, sc, err := s.svr.ln.Dup()
+	if err != nil {
+		logging.DefaultLogger.Warnf("%s failed when duplicating new fd\n", sc)
+	}
 	return
 }
 
@@ -148,6 +160,8 @@ type (
 		// OnOpened fires when a new connection has been opened.
 		// The parameter:c has information about the connection such as it's local and remote address.
 		// Parameter:out is the return value which is going to be sent back to the client.
+		//
+		// Note that the bytes returned by OnOpened will be sent back to client without being encoded.
 		OnOpened(c Conn) (out []byte, action Action)
 
 		// OnClosed fires when a connection has been closed.
@@ -255,7 +269,40 @@ func Serve(eventHandler EventHandler, protoAddr string, opts ...Option) (err err
 	}
 	defer ln.close()
 
-	return serve(eventHandler, ln, options)
+	return serve(eventHandler, ln, options, protoAddr)
+}
+
+// shutdownPollInterval is how often we poll to check whether server has been shut down during gnet.Stop().
+var shutdownPollInterval = 500 * time.Millisecond
+
+// Stop gracefully shuts down the server without interrupting any active eventloops,
+// it waits indefinitely for connections and eventloops to be closed and then shuts down.
+func Stop(ctx context.Context, protoAddr string) error {
+	var svr *server
+	if s, ok := serverFarm.Load(protoAddr); ok {
+		svr = s.(*server)
+		svr.signalShutdown()
+		defer serverFarm.Delete(protoAddr)
+	} else {
+		return errors.ErrServerInShutdown
+	}
+
+	if svr.isInShutdown() {
+		return errors.ErrServerInShutdown
+	}
+
+	ticker := time.NewTicker(shutdownPollInterval)
+	defer ticker.Stop()
+	for {
+		if svr.isInShutdown() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func parseProtoAddr(addr string) (network, address string) {
@@ -276,15 +323,19 @@ func sniffErrorAndLog(err error) {
 }
 
 // channelBuffer determines whether the channel should be a buffered channel to get the best performance.
-func channelBuffer(preset int) int {
+var channelBuffer = func() int {
 	// Use blocking channel if GOMAXPROCS=1.
 	// This switches context from sender to receiver immediately,
-	// which results in higher performance (under go1.5 at least).
-	if runtime.GOMAXPROCS(0) == 1 {
+	// which results in higher performance.
+	var n int
+	if n = runtime.GOMAXPROCS(0); n == 1 {
 		return 0
 	}
 
-	// Use non-blocking workerChan if GOMAXPROCS>1,
-	// since otherwise the sender might be dragged down if the receiver is CPU-bound.
-	return preset
-}
+	// Make channel non-blocking and set up its capacity with GOMAXPROCS if GOMAXPROCS>1,
+	// otherwise the sender might be dragged down if the receiver is CPU-bound.
+	//
+	// GOMAXPROCS determines how many goroutines can run in parallel,
+	// which makes it the best choice as the channel capacity,
+	return n
+}()

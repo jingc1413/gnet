@@ -25,19 +25,23 @@ package netpoll
 
 import (
 	"os"
+	"runtime"
+	"sync/atomic"
 	"unsafe"
 
-	"github.com/panjf2000/gnet/internal"
+	"github.com/panjf2000/gnet/errors"
 	"github.com/panjf2000/gnet/internal/logging"
+	"github.com/panjf2000/gnet/internal/netpoll/queue"
 	"golang.org/x/sys/unix"
 )
 
 // Poller represents a poller which is in charge of monitoring file-descriptors.
 type Poller struct {
-	fd            int    // epoll fd
-	wfd           int    // wake fd
-	wfdBuf        []byte // wfd buffer to read packet
-	asyncJobQueue internal.AsyncJobQueue
+	fd             int    // epoll fd
+	wfd            int    // wake fd
+	wfdBuf         []byte // wfd buffer to read packet
+	netpollWakeSig int32
+	asyncTaskQueue queue.AsyncTaskQueue
 }
 
 // OpenPoller instantiates a poller.
@@ -60,7 +64,7 @@ func OpenPoller() (poller *Poller, err error) {
 		poller = nil
 		return
 	}
-	poller.asyncJobQueue = internal.NewAsyncJobQueue()
+	poller.asyncTaskQueue = queue.NewLockFreeQueue()
 	return
 }
 
@@ -79,42 +83,75 @@ var (
 	b        = (*(*[8]byte)(unsafe.Pointer(&u)))[:]
 )
 
-// Trigger wakes up the poller blocked in waiting for network-events and runs jobs in asyncJobQueue.
-func (p *Poller) Trigger(job internal.Job) (err error) {
-	if p.asyncJobQueue.Push(job) == 1 {
-		_, err = unix.Write(p.wfd, b)
+// Trigger wakes up the poller blocked in waiting for network-events and runs jobs in asyncTaskQueue.
+func (p *Poller) Trigger(task queue.Task) (err error) {
+	p.asyncTaskQueue.Enqueue(task)
+	if atomic.CompareAndSwapInt32(&p.netpollWakeSig, 0, 1) {
+		for _, err = unix.Write(p.wfd, b); err == unix.EINTR || err == unix.EAGAIN; _, err = unix.Write(p.wfd, b) {
+		}
 	}
 	return os.NewSyscallError("write", err)
 }
 
 // Polling blocks the current goroutine, waiting for network-events.
-func (p *Poller) Polling(callback func(fd int, ev uint32) error) (err error) {
+func (p *Poller) Polling(callback func(fd int, ev uint32) error) error {
 	el := newEventList(InitEvents)
 	var wakenUp bool
+
+	msec := -1
 	for {
-		n, err0 := unix.EpollWait(p.fd, el.events, -1)
-		if err0 != nil && err0 != unix.EINTR {
-			logging.DefaultLogger.Warnf("Error occurs in epoll, %v", os.NewSyscallError("epoll_wait", err0))
+		n, err := unix.EpollWait(p.fd, el.events, msec)
+		if n == 0 || (n < 0 && err == unix.EINTR) {
+			msec = -1
+			runtime.Gosched()
 			continue
+		} else if err != nil {
+			logging.DefaultLogger.Warnf("Error occurs in epoll: %v", os.NewSyscallError("epoll_wait", err))
+			return err
 		}
+		msec = 0
+
 		for i := 0; i < n; i++ {
 			if fd := int(el.events[i].Fd); fd != p.wfd {
-				if err = callback(fd, el.events[i].Events); err != nil {
-					return
+				switch err = callback(fd, el.events[i].Events); err {
+				case nil:
+				case errors.ErrAcceptSocket, errors.ErrServerShutdown:
+					return err
+				default:
+					logging.DefaultLogger.Warnf("Error occurs in event-loop: %v", err)
 				}
 			} else {
 				wakenUp = true
 				_, _ = unix.Read(p.wfd, p.wfdBuf)
 			}
 		}
+
 		if wakenUp {
 			wakenUp = false
-			if err = p.asyncJobQueue.ForEach(); err != nil {
-				return
+			var task queue.Task
+			for i := 0; i < AsyncTasks; i++ {
+				if task = p.asyncTaskQueue.Dequeue(); task == nil {
+					break
+				}
+				switch err = task(); err {
+				case nil:
+				case errors.ErrServerShutdown:
+					return err
+				default:
+					logging.DefaultLogger.Warnf("Error occurs in user-defined function, %v", err)
+				}
+			}
+			atomic.StoreInt32(&p.netpollWakeSig, 0)
+			if !p.asyncTaskQueue.Empty() {
+				for _, err = unix.Write(p.wfd, b); err == unix.EINTR || err == unix.EAGAIN; _, err = unix.Write(p.wfd, b) {
+				}
 			}
 		}
+
 		if n == el.size {
-			el.increase()
+			el.expand()
+		} else if n < el.size>>1 {
+			el.shrink()
 		}
 	}
 }

@@ -23,7 +23,6 @@ package gnet
 import (
 	"runtime"
 
-	"github.com/panjf2000/gnet/errors"
 	"github.com/panjf2000/gnet/internal/netpoll"
 )
 
@@ -35,12 +34,8 @@ func (svr *server) activateMainReactor(lockOSThread bool) {
 
 	defer svr.signalShutdown()
 
-	switch err := svr.mainLoop.poller.Polling(func(fd int, ev uint32) error { return svr.acceptNewConnection(fd) }); err {
-	case errors.ErrServerShutdown:
-		svr.logger.Infof("Main reactor is exiting normally on the signal error: %v", err)
-	default:
-		svr.logger.Errorf("Main reactor is exiting due to an unexpected error: %v", err)
-	}
+	err := svr.mainLoop.poller.Polling(func(fd int, ev uint32) error { return svr.acceptNewConnection(fd) })
+	svr.logger.Infof("Main reactor is exiting due to error: %v", err)
 }
 
 func (svr *server) activateSubReactor(el *eventloop, lockOSThread bool) {
@@ -51,39 +46,32 @@ func (svr *server) activateSubReactor(el *eventloop, lockOSThread bool) {
 
 	defer func() {
 		el.closeAllConns()
-		if el.idx == 0 && svr.opts.Ticker {
-			close(svr.ticktock)
-		}
 		svr.signalShutdown()
 	}()
 
-	if el.idx == 0 && svr.opts.Ticker {
-		go el.loopTicker()
-	}
-
-	switch err := el.poller.Polling(func(fd int, ev uint32) error {
+	err := el.poller.Polling(func(fd int, ev uint32) error {
 		if c, ack := el.connections[fd]; ack {
-			switch c.outboundBuffer.IsEmpty() {
 			// Don't change the ordering of processing EPOLLOUT | EPOLLRDHUP / EPOLLIN unless you're 100%
 			// sure what you're doing!
 			// Re-ordering can easily introduce bugs and bad side-effects, as I found out painfully in the past.
-			case false:
-				if ev&netpoll.OutEvents != 0 {
-					return el.loopWrite(c)
+
+			// We should always check for the EPOLLOUT event first, as we must try to send the leftover data back to
+			// client when any error occurs on a connection.
+			//
+			// Either an EPOLLOUT or EPOLLERR event may be fired when a connection is refused.
+			// In either case loopWrite() should take care of it properly:
+			// 1) writing data back,
+			// 2) closing the connection.
+			if ev&netpoll.OutEvents != 0 {
+				if err := el.loopWrite(c); err != nil {
+					return err
 				}
-				return nil
-			case true:
-				if ev&netpoll.InEvents != 0 {
-					return el.loopRead(c)
-				}
-				return nil
+			}
+			if ev&netpoll.InEvents != 0 {
+				return el.loopRead(c)
 			}
 		}
 		return nil
-	}); err {
-	case errors.ErrServerShutdown:
-		svr.logger.Infof("Event-loop(%d) is exiting normally on the signal error: %v", el.idx, err)
-	default:
-		svr.logger.Errorf("Event-loop(%d) is exiting due to an unexpected error: %v", el.idx, err)
-	}
+	})
+	svr.logger.Infof("Event-loop(%d) is exiting normally on the signal error: %v", el.idx, err)
 }
